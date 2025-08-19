@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>California Paycheck & 401(k) Calculator</title>
+    <!-- Tailwind CSS via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React and ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Recharts -->
+    <script src="https://unpkg.com/recharts/umd/Recharts.min.js"></script>
+    <!-- Babel for JSX in the browser -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  </head>
+  <body class="bg-gray-50 min-h-screen py-8 px-4">
+    <div id="root"></div>
+    <script type="text/babel">
+      const { useState, useEffect } = React;
+      const {
+        BarChart,
+        Bar,
+        XAxis,
+        YAxis,
+        Tooltip,
+        Legend,
+        ResponsiveContainer,
+        LineChart,
+        Line,
+        CartesianGrid,
+      } = Recharts;
+
+      function calcFederalTax(taxable, status) {
+        const bracketsMFJ = [
+          { limit: 23850, rate: 0.10 },
+          { limit: 96950, rate: 0.12 },
+          { limit: 206700, rate: 0.22 },
+          { limit: 366700, rate: 0.24 },
+          { limit: 462500, rate: 0.32 },
+          { limit: 693750, rate: 0.35 },
+          { limit: Infinity, rate: 0.37 },
+        ];
+        const bracketsSingle = [
+          { limit: 11950, rate: 0.10 },
+          { limit: 48475, rate: 0.12 },
+          { limit: 103350, rate: 0.22 },
+          { limit: 183950, rate: 0.24 },
+          { limit: 231250, rate: 0.32 },
+          { limit: 346875, rate: 0.35 },
+          { limit: Infinity, rate: 0.37 },
+        ];
+        const brackets = status === 'MFJ' ? bracketsMFJ : bracketsSingle;
+        let remaining = taxable;
+        let tax = 0;
+        let prev = 0;
+        for (let i = 0; i < brackets.length && remaining > 0; i++) {
+          const { limit, rate } = brackets[i];
+          const band = Math.min(remaining, limit - prev);
+          if (band > 0) {
+            tax += band * rate;
+            remaining -= band;
+            prev = limit;
+          } else {
+            break;
+          }
+        }
+        return tax;
+      }
+
+      function calcCATax(taxable, status) {
+        // Approximate California tax using a base + marginal 6% above threshold
+        if (taxable <= 0) return 0;
+        if (status === 'MFJ') {
+          const base = 1984.52;
+          const threshold = 80490;
+          if (taxable <= threshold) {
+            // approximate lower brackets by 4%
+            return taxable * 0.04;
+          }
+          return base + 0.06 * (taxable - threshold);
+        } else {
+          const base = 992.26;
+          const threshold = 40245;
+          if (taxable <= threshold) {
+            return taxable * 0.04;
+          }
+          return base + 0.06 * (taxable - threshold);
+        }
+      }
+
+      function calcFica(income) {
+        const socialCap = 176100;
+        const social = Math.min(income, socialCap) * 0.062;
+        const medicare = income * 0.0145;
+        return social + medicare;
+      }
+
+      function calcCASDI(income) {
+        return income * 0.012;
+      }
+
+      function App() {
+        const [status, setStatus] = useState('MFJ');
+        const [salary, setSalary] = useState(100000);
+        const [payFreq, setPayFreq] = useState('weekly');
+        const [percent401k, setPercent401k] = useState(6);
+        const [matchRate, setMatchRate] = useState(0.5);
+        const [matchCap, setMatchCap] = useState(6);
+        const [raise, setRaise] = useState(3);
+        const [years, setYears] = useState(30);
+        const [returnRate, setReturnRate] = useState(7);
+        const [discountRate, setDiscountRate] = useState(4);
+        const [federalDeduct, setFederalDeduct] = useState(status === 'MFJ' ? 30000 : 15000);
+        const [caDeduct, setCaDeduct] = useState(status === 'MFJ' ? 11080 : 5540);
+        const [limit401k, setLimit401k] = useState(23000);
+
+        useEffect(() => {
+          setFederalDeduct(status === 'MFJ' ? 30000 : 15000);
+          setCaDeduct(status === 'MFJ' ? 11080 : 5540);
+        }, [status]);
+
+        function computeCurrent() {
+          const income = salary;
+          const contribPercent = percent401k / 100;
+          // Clamp 401k to IRS limit
+          let employee401k = income * contribPercent;
+          const maxContrib = limit401k;
+          if (employee401k > maxContrib) {
+            employee401k = maxContrib;
+          }
+          const taxableFed = Math.max(0, income - federalDeduct - employee401k);
+          const taxableCA = Math.max(0, income - caDeduct - employee401k);
+          const fedTax = calcFederalTax(taxableFed, status);
+          const caTax = calcCATax(taxableCA, status);
+          const fica = calcFica(income);
+          const casdi = calcCASDI(income);
+          // Employer match: matchRate for each dollar up to matchCap percent of salary
+          const match = income * Math.min(contribPercent, matchCap / 100) * matchRate;
+          const takeHome = income - fedTax - fica - caTax - casdi - employee401k;
+          return {
+            employee401k,
+            match,
+            fedTax,
+            caTax,
+            fica,
+            casdi,
+            takeHome,
+          };
+        }
+
+        function computeProjection() {
+          const yrs = parseInt(years, 10);
+          const raiseRate = raise / 100;
+          const contribRate = percent401k / 100;
+          const mRate = matchRate;
+          const mCap = matchCap / 100;
+          const expReturn = returnRate / 100;
+          const disc = discountRate / 100;
+          let currSalary = salary;
+          const data = [];
+          let totalEmployee = 0;
+          let totalMatch = 0;
+          let futureValue = 0;
+          let presentValue = 0;
+          for (let i = 0; i < yrs; i++) {
+            // contributions this year (pre tax, not capped by limit for projection)
+            let employee = currSalary * contribRate;
+            // clamp to limit
+            if (employee > limit401k) {
+              employee = limit401k;
+            }
+            const match = currSalary * Math.min(contribRate, mCap) * mRate;
+            totalEmployee += employee;
+            totalMatch += match;
+            // Each year's contributions compound for (yrs - i - 1) more years
+            const fvEmployee = employee * Math.pow(1 + expReturn, yrs - i - 1);
+            const fvMatch = match * Math.pow(1 + expReturn, yrs - i - 1);
+            futureValue += fvEmployee + fvMatch;
+            // Present value discount back to today (i+1 years from now)
+            const pvEmployee = employee / Math.pow(1 + disc, i + 1);
+            const pvMatch = match / Math.pow(1 + disc, i + 1);
+            presentValue += pvEmployee + pvMatch;
+            data.push({
+              year: i + 1,
+              salary: currSalary,
+              employee,
+              match,
+              total: employee + match,
+              cumulative: totalEmployee + totalMatch,
+            });
+            currSalary = currSalary * (1 + raiseRate);
+          }
+          return { data, totalEmployee, totalMatch, futureValue, presentValue };
+        }
+
+        const current = computeCurrent();
+        const proj = computeProjection();
+
+        const payPeriods = {
+          weekly: 52,
+          biweekly: 26,
+          semimonthly: 24,
+          monthly: 12,
+          yearly: 1,
+        };
+        const periods = payPeriods[payFreq] || 52;
+        const periodTakeHome = current.takeHome / periods;
+
+        const breakdownData = [
+          {
+            name: 'Annual',
+            'Take-Home': current.takeHome,
+            Federal: current.fedTax,
+            'FICA (SS+Med)': current.fica,
+            'CA Income Tax': current.caTax,
+            'CA SDI': current.casdi,
+            'Employee 401(k)': current.employee401k,
+          },
+        ];
+
+        return (
+          <div className="max-w-4xl mx-auto">
+            <h1 className="text-3xl font-bold mb-4 text-center">CA Paycheck & 401(k) Planner</h1>
+            <div className="bg-white shadow rounded-lg p-4 mb-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium">Filing Status</label>
+                  <select
+                    value={status}
+                    onChange={(e) => setStatus(e.target.value)}
+                    className="mt-1 p-2 border rounded w-full"
+                  >
+                    <option value="MFJ">Married Filing Jointly</option>
+                    <option value="Single">Single</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium">Annual Salary ($)</label>
+                  <input
+                    type="number"
+                    value={salary}
+                    onChange={(e) => setSalary(parseFloat(e.target.value) || 0)}
+                    className="mt-1 p-2 border rounded w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium">Pay Frequency</label>
+                  <select
+                    value={payFreq}
+                    onChange={(e) => setPayFreq(e.target.value)}
+                    className="mt-1 p-2 border rounded w-full"
+                  >
+                    <option value="weekly">Weekly</option>
+                    <option value="biweekly">Biweekly</option>
+                    <option value="semimonthly">Semi-Monthly</option>
+                    <option value="monthly">Monthly</option>
+                    <option value="yearly">Yearly</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium">401(k) % (of salary)</label>
+                  <input
+                    type="number"
+                    value={percent401k}
+                    min="0"
+                    max="100"
+                    onChange={(e) => setPercent401k(parseFloat(e.target.value) || 0)}
+                    className="mt-1 p-2 border rounded w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium">Company Match (per $)</label>
+                  <input
+                    type="number"
+                    value={matchRate}
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    onChange={(e) => setMatchRate(parseFloat(e.target.value) || 0)}
+                    className="mt-1 p-2 border rounded w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium">Match up to % of salary</label>
+                  <input
+                    type="number"
+                    value={matchCap}
+                    min="0"
+                    max="100"
+                    onChange={(e) => setMatchCap(parseFloat(e.target.value) || 0)}
+                    className="mt-1 p-2 border rounded w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium">Annual Salary Raise %</label>
+                  <input
+                    type="number"
+                    value={raise}
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    onChange={(e) => setRaise(parseFloat(e.target.value) || 0)}
+                    className="mt-1 p-2 border rounded w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium">Years to Project</label>
+                  <input
+                    type="number"
+                    value={years}
+                    min="1"
+                    max="50"
+                    onChange={(e) => setYears(parseInt(e.target.value) || 0)}
+                    className="mt-1 p-2 border rounded w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium">Expected Return %</label>
+                  <input
+                    type="number"
+                    value={returnRate}
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    onChange={(e) => setReturnRate(parseFloat(e.target.value) || 0)}
+                    className="mt-1 p-2 border rounded w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium">Discount Rate % (for PV)</label>
+                  <input
+                    type="number"
+                    value={discountRate}
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    onChange={(e) => setDiscountRate(parseFloat(e.target.value) || 0)}
+                    className="mt-1 p-2 border rounded w-full"
+                  />
+                </div>
+              </div>
+              <details className="mt-4">
+                <summary className="cursor-pointer font-semibold">Advanced settings</summary>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
+                  <div>
+                    <label className="block text-sm font-medium">Federal Standard Deduction ($)</label>
+                    <input
+                      type="number"
+                      value={federalDeduct}
+                      min="0"
+                      onChange={(e) => setFederalDeduct(parseFloat(e.target.value) || 0)}
+                      className="mt-1 p-2 border rounded w-full"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium">CA Standard Deduction ($)</label>
+                    <input
+                      type="number"
+                      value={caDeduct}
+                      min="0"
+                      onChange={(e) => setCaDeduct(parseFloat(e.target.value) || 0)}
+                      className="mt-1 p-2 border rounded w-full"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium">401(k) Contribution Limit ($)</label>
+                    <input
+                      type="number"
+                      value={limit401k}
+                      min="0"
+                      onChange={(e) => setLimit401k(parseFloat(e.target.value) || 0)}
+                      className="mt-1 p-2 border rounded w-full"
+                    />
+                  </div>
+                </div>
+              </details>
+            </div>
+            <div className="bg-white shadow rounded-lg p-4 mb-6">
+              <h2 className="text-xl font-semibold mb-2">Current Take‑Home</h2>
+              <p className="mb-2">
+                Annual take‑home: <strong>${(current.takeHome).toFixed(0)}</strong>, per-
+                {payFreq}: <strong>${(periodTakeHome).toFixed(0)}</strong>
+              </p>
+              <div style={{ width: '100%', height: 300 }}>
+                <ResponsiveContainer>
+                  <BarChart data={breakdownData} margin={{ top: 20, right: 30, left: 0, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="name" />
+                    <YAxis />
+                    <Tooltip formatter={(value) => `$${value.toFixed(0)}`} />
+                    <Legend />
+                    <Bar dataKey="Take-Home" stackId="a" />
+                    <Bar dataKey="Federal" stackId="a" />
+                    <Bar dataKey="FICA (SS+Med)" stackId="a" />
+                    <Bar dataKey="CA Income Tax" stackId="a" />
+                    <Bar dataKey="CA SDI" stackId="a" />
+                    <Bar dataKey="Employee 401(k)" stackId="a" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+            <div className="bg-white shadow rounded-lg p-4 mb-6">
+              <h2 className="text-xl font-semibold mb-2">Projection</h2>
+              <p className="mb-2">
+                Total contributions (employee + match):{' '}
+                <strong>${(proj.totalEmployee + proj.totalMatch).toFixed(0)}</strong> | Future value:{' '}
+                <strong>${(proj.futureValue).toFixed(0)}</strong> | Present value:{' '}
+                <strong>${(proj.presentValue).toFixed(0)}</strong>
+              </p>
+              <div style={{ width: '100%', height: 300 }}>
+                <ResponsiveContainer>
+                  <LineChart data={proj.data} margin={{ top: 20, right: 30, left: 0, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="year" />
+                    <YAxis />
+                    <Tooltip
+                      formatter={(value) => `$${value.toFixed(0)}`}
+                      labelFormatter={(label) => `Year ${label}`}
+                    />
+                    <Legend />
+                    <Line type="monotone" dataKey="employee" name="Employee" />
+                    <Line type="monotone" dataKey="match" name="Employer Match" />
+                    <Line type="monotone" dataKey="cumulative" name="Cumulative" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+            <footer className="text-center text-sm text-gray-500">
+              <p>
+                This calculator provides illustrative estimates only and does not constitute tax or financial advice.
+              </p>
+            </footer>
+          </div>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+  </body>
+</html>
