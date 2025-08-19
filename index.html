@@ -31,73 +31,132 @@
         CartesianGrid,
       } = Recharts;
 
-      function calcFederalTax(taxable, status) {
-        const bracketsMFJ = [
-          { limit: 23850, rate: 0.10 },
-          { limit: 96950, rate: 0.12 },
-          { limit: 206700, rate: 0.22 },
-          { limit: 366700, rate: 0.24 },
-          { limit: 462500, rate: 0.32 },
-          { limit: 693750, rate: 0.35 },
-          { limit: Infinity, rate: 0.37 },
-        ];
-        const bracketsSingle = [
-          { limit: 11950, rate: 0.10 },
-          { limit: 48475, rate: 0.12 },
-          { limit: 103350, rate: 0.22 },
-          { limit: 183950, rate: 0.24 },
-          { limit: 231250, rate: 0.32 },
-          { limit: 346875, rate: 0.35 },
-          { limit: Infinity, rate: 0.37 },
-        ];
-        const brackets = status === 'MFJ' ? bracketsMFJ : bracketsSingle;
-        let remaining = taxable;
+      /*
+       * Updated tax and benefit calculations.  These functions mirror the
+       * progressive tax logic from the provided React component.  Federal
+       * and California taxes are computed against real 2025 and 2024 bracket
+       * tables, FICA includes additional Medicare tax above the threshold,
+       * and CA SDI is a flat rate with no wage cap.  A small set of helper
+       * functions are defined up front to encapsulate the progressive tax
+       * computation and 401(k) clamping logic.
+       */
+
+      // Bracket definitions for 2025 Federal and 2024 CA taxes
+      const FED_SINGLE_BRACKETS = [
+        { upTo: 11925, rate: 0.10 },
+        { upTo: 48475, rate: 0.12 },
+        { upTo: 103350, rate: 0.22 },
+        { upTo: 197300, rate: 0.24 },
+        { upTo: 250525, rate: 0.32 },
+        { upTo: 626350, rate: 0.35 },
+        { upTo: Infinity, rate: 0.37 },
+      ];
+      const FED_MFJ_BRACKETS = [
+        { upTo: 23850, rate: 0.10 },
+        { upTo: 96950, rate: 0.12 },
+        { upTo: 206700, rate: 0.22 },
+        { upTo: 394600, rate: 0.24 },
+        { upTo: 501050, rate: 0.32 },
+        { upTo: 751600, rate: 0.35 },
+        { upTo: Infinity, rate: 0.37 },
+      ];
+      const CA_SINGLE_BRACKETS = [
+        { upTo: 10756, rate: 0.01 },
+        { upTo: 25499, rate: 0.02 },
+        { upTo: 40245, rate: 0.04 },
+        { upTo: 55866, rate: 0.06 },
+        { upTo: 70606, rate: 0.08 },
+        { upTo: 360659, rate: 0.093 },
+        { upTo: 432787, rate: 0.103 },
+        { upTo: 721314, rate: 0.113 },
+        { upTo: Infinity, rate: 0.123 },
+      ];
+      const CA_MFJ_BRACKETS = [
+        { upTo: 21512, rate: 0.01 },
+        { upTo: 50998, rate: 0.02 },
+        { upTo: 80490, rate: 0.04 },
+        { upTo: 111732, rate: 0.06 },
+        { upTo: 141212, rate: 0.08 },
+        { upTo: 721318, rate: 0.093 },
+        { upTo: 865574, rate: 0.103 },
+        { upTo: 1442628, rate: 0.113 },
+        { upTo: Infinity, rate: 0.123 },
+      ];
+
+      /**
+       * Compute progressive tax given a taxable amount and a bracket table.
+       * Taxable income is taxed at each marginal rate up to the limit for
+       * that bracket.  If taxable <= 0 the tax is zero.
+       */
+      function progressiveTax(taxable, brackets) {
+        if (taxable <= 0) return 0;
         let tax = 0;
-        let prev = 0;
-        for (let i = 0; i < brackets.length && remaining > 0; i++) {
-          const { limit, rate } = brackets[i];
-          const band = Math.min(remaining, limit - prev);
-          if (band > 0) {
-            tax += band * rate;
-            remaining -= band;
-            prev = limit;
-          } else {
-            break;
-          }
+        let lower = 0;
+        for (const b of brackets) {
+          const upper = Math.min(taxable, b.upTo);
+          if (upper > lower) tax += (upper - lower) * b.rate;
+          if (taxable <= b.upTo) break;
+          lower = b.upTo;
         }
         return tax;
       }
 
+      /**
+       * Federal tax calculation based on filing status and taxable income.
+       */
+      function calcFederalTax(taxable, status) {
+        const brackets = status === 'MFJ' ? FED_MFJ_BRACKETS : FED_SINGLE_BRACKETS;
+        return progressiveTax(taxable, brackets);
+      }
+
+      /**
+       * California tax calculation using progressive brackets by filing status.
+       */
       function calcCATax(taxable, status) {
-        // Approximate California tax using a base + marginal 6% above threshold
-        if (taxable <= 0) return 0;
-        if (status === 'MFJ') {
-          const base = 1984.52;
-          const threshold = 80490;
-          if (taxable <= threshold) {
-            // approximate lower brackets by 4%
-            return taxable * 0.04;
-          }
-          return base + 0.06 * (taxable - threshold);
-        } else {
-          const base = 992.26;
-          const threshold = 40245;
-          if (taxable <= threshold) {
-            return taxable * 0.04;
-          }
-          return base + 0.06 * (taxable - threshold);
-        }
+        const brackets = status === 'MFJ' ? CA_MFJ_BRACKETS : CA_SINGLE_BRACKETS;
+        return progressiveTax(taxable, brackets);
       }
 
-      function calcFica(income) {
-        const socialCap = 176100;
-        const social = Math.min(income, socialCap) * 0.062;
-        const medicare = income * 0.0145;
-        return social + medicare;
+      /**
+       * Constants for FICA and SDI.
+       */
+      const FICA_CONSTANTS = {
+        ssRate: 0.062,
+        ssWageBase: 176100,
+        medicareRate: 0.0145,
+        addlMedicareRate: 0.009,
+        addlMedicareThreshold: { Single: 200000, MFJ: 250000 },
+      };
+      const CA_SDI_RATE = 0.012;
+
+      /**
+       * Calculate Social Security and Medicare taxes based on gross income and filing status.
+       */
+      function calcFicaComponents(income, status) {
+        // Social Security up to wage base
+        const ss = Math.min(income, FICA_CONSTANTS.ssWageBase) * FICA_CONSTANTS.ssRate;
+        // Base Medicare 1.45% on all earnings
+        const medicareBase = income * FICA_CONSTANTS.medicareRate;
+        // Additional Medicare 0.9% above threshold
+        const threshold = FICA_CONSTANTS.addlMedicareThreshold[status];
+        const addlMed = Math.max(0, income - threshold) * FICA_CONSTANTS.addlMedicareRate;
+        return { ss, medicare: medicareBase + addlMed };
       }
 
+      /**
+       * California SDI: simple percentage of wages, no cap.
+       */
       function calcCASDI(income) {
-        return income * 0.012;
+        return income * CA_SDI_RATE;
+      }
+
+      /**
+       * Clamp employee 401(k) contributions against the IRS limit (and optional catch‑up).
+       */
+      function clamp401k(empPct, salary, limit, catchup) {
+        const desired = empPct * salary;
+        const cap = limit + catchup;
+        return Math.min(Math.max(0, desired), cap);
       }
 
       function App() {
@@ -122,21 +181,24 @@
 
         function computeCurrent() {
           const income = salary;
-          const contribPercent = percent401k / 100;
-          // Clamp 401k to IRS limit
-          let employee401k = income * contribPercent;
-          const maxContrib = limit401k;
-          if (employee401k > maxContrib) {
-            employee401k = maxContrib;
-          }
+          // Convert 401(k) percentage to decimal
+          const empPct = percent401k / 100;
+          // Clamp 401(k) contributions to the annual limit (catch‑up is zero by default)
+          const employee401k = clamp401k(empPct, income, limit401k, 0);
+          // Compute taxable income after standard deduction and 401(k) contributions
           const taxableFed = Math.max(0, income - federalDeduct - employee401k);
           const taxableCA = Math.max(0, income - caDeduct - employee401k);
+          // Compute taxes
           const fedTax = calcFederalTax(taxableFed, status);
           const caTax = calcCATax(taxableCA, status);
-          const fica = calcFica(income);
+          // Compute FICA components (SS + Medicare + additional Medicare) and sum to one figure
+          const { ss, medicare } = calcFicaComponents(income, status);
+          const fica = ss + medicare;
+          // California SDI is a separate deduction
           const casdi = calcCASDI(income);
           // Employer match: matchRate for each dollar up to matchCap percent of salary
-          const match = income * Math.min(contribPercent, matchCap / 100) * matchRate;
+          const match = income * Math.min(empPct, matchCap / 100) * matchRate;
+          // Take‑home pay after all deductions and employee 401(k)
           const takeHome = income - fedTax - fica - caTax - casdi - employee401k;
           return {
             employee401k,
@@ -152,9 +214,9 @@
         function computeProjection() {
           const yrs = parseInt(years, 10);
           const raiseRate = raise / 100;
-          const contribRate = percent401k / 100;
+          const empPct = percent401k / 100;
           const mRate = matchRate;
-          const mCap = matchCap / 100;
+          const mCapPct = matchCap / 100;
           const expReturn = returnRate / 100;
           const disc = discountRate / 100;
           let currSalary = salary;
@@ -164,23 +226,29 @@
           let futureValue = 0;
           let presentValue = 0;
           for (let i = 0; i < yrs; i++) {
-            // contributions this year (pre tax, not capped by limit for projection)
-            let employee = currSalary * contribRate;
-            // clamp to limit
-            if (employee > limit401k) {
-              employee = limit401k;
-            }
-            const match = currSalary * Math.min(contribRate, mCap) * mRate;
+            // Employee contribution for this year, clamped against the 401(k) limit (no catch‑up in projection)
+            const employee = clamp401k(empPct, currSalary, limit401k, 0);
+            // Employer match: matchRate per dollar up to mCapPct of salary
+            const match = currSalary * Math.min(empPct, mCapPct) * mRate;
             totalEmployee += employee;
             totalMatch += match;
-            // Each year's contributions compound for (yrs - i - 1) more years
+            // Future value: each year's contributions grow until the end of the projection
             const fvEmployee = employee * Math.pow(1 + expReturn, yrs - i - 1);
             const fvMatch = match * Math.pow(1 + expReturn, yrs - i - 1);
             futureValue += fvEmployee + fvMatch;
-            // Present value discount back to today (i+1 years from now)
+            // Present value: discount contributions back to today (i+1 years from now)
             const pvEmployee = employee / Math.pow(1 + disc, i + 1);
             const pvMatch = match / Math.pow(1 + disc, i + 1);
             presentValue += pvEmployee + pvMatch;
+            // Compute take‑home for this year with current salary and contribution
+            const taxableFed = Math.max(0, currSalary - federalDeduct - employee);
+            const taxableCA = Math.max(0, currSalary - caDeduct - employee);
+            const fedTax = calcFederalTax(taxableFed, status);
+            const caTax = calcCATax(taxableCA, status);
+            const { ss, medicare } = calcFicaComponents(currSalary, status);
+            const fica = ss + medicare;
+            const casdi = calcCASDI(currSalary);
+            const takeHome = currSalary - fedTax - fica - caTax - casdi - employee;
             data.push({
               year: i + 1,
               salary: currSalary,
@@ -188,7 +256,9 @@
               match,
               total: employee + match,
               cumulative: totalEmployee + totalMatch,
+              takeHome: takeHome,
             });
+            // Apply raise to salary for next year
             currSalary = currSalary * (1 + raiseRate);
           }
           return { data, totalEmployee, totalMatch, futureValue, presentValue };
@@ -390,12 +460,12 @@
                     <YAxis />
                     <Tooltip formatter={(value) => `$${value.toFixed(0)}`} />
                     <Legend />
-                    <Bar dataKey="Take-Home" stackId="a" />
-                    <Bar dataKey="Federal" stackId="a" />
-                    <Bar dataKey="FICA (SS+Med)" stackId="a" />
-                    <Bar dataKey="CA Income Tax" stackId="a" />
-                    <Bar dataKey="CA SDI" stackId="a" />
-                    <Bar dataKey="Employee 401(k)" stackId="a" />
+                    <Bar dataKey="Employee 401(k)" stackId="a" fill="#6366F1" />
+                    <Bar dataKey="Federal" stackId="a" fill="#22C55E" />
+                    <Bar dataKey="FICA (SS+Med)" stackId="a" fill="#06B6D4" />
+                    <Bar dataKey="CA Income Tax" stackId="a" fill="#F59E0B" />
+                    <Bar dataKey="CA SDI" stackId="a" fill="#EF4444" />
+                    <Bar dataKey="Take-Home" stackId="a" fill="#A78BFA" />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
